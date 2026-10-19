@@ -14,7 +14,7 @@ struct P {
 struct U {
     float time, dt, resX, resY;
     float bass, mid, treb, bassAtt, midAtt, trebAtt;
-    float loudness, kick, hat, onset, beat, beatPhase, rhythm, centroid, hue, flash, seed, rotSign;
+    float loudness, kick, hat, onset, beat, beatPhase, rhythm, centroid, hue, flash, seed, rotSign, burst;
     P p;
 };
 
@@ -105,6 +105,10 @@ fragment float4 warpFrag(VOut in [[stage_in]],
     src += 0.01 * dt * u.p.warp * (0.6 + 0.6 * u.loudness)
          * curl(src * u.p.warpScale + float2(u.time * u.p.warpSpeed, u.seed));
     src -= 0.01 * dt * float2(u.p.dx, -u.p.dy);
+    // Track-change shockwave: an expanding ring that shoves the picture outward as it passes.
+    float burstR = (1.0 - u.burst) * 1.3;
+    float ring = exp(-pow((length(q) - burstR) / 0.03, 2.0)) * u.burst * u.burst;
+    src *= 1.0 - 0.04 * ring * dt;
     float2 suv = src + c;
     suv.x /= aspect;
     suv += 0.5;
@@ -179,6 +183,7 @@ fragment float4 warpFrag(VOut in [[stage_in]],
     // Kick punch in the middle (only when the music has a pulse).
     add += hsv2rgb(hue + 0.1, sat * 0.7, 1.0) * u.kick * u.rhythm * exp(-length(q) * 12.0) * 0.15;
 
+    add += hsv2rgb(hue + 0.5, 0.5, 1.0) * ring * 0.22;
     col += add * u.p.brightness * min(dt, 2.0);
     return float4(clamp(col, 0.0, 4.0), 1.0);
 }

@@ -1,52 +1,74 @@
 import AppKit
 
-/// Watches the Spotify desktop app for the current track and its album art.
-/// Uses Spotify's playback notification as the trigger and its AppleScript dictionary for details
-/// (needs the one-time "Wavedrop wants to control Spotify" Automation permission).
-final class SpotifyNowPlaying {
-    struct Track: Equatable {
-        var id: String
-        var title: String
-        var artist: String
-        var album: String
-        var artworkURL: String
-        var playing: Bool
-    }
+struct NowPlayingTrack: Equatable {
+    var player: String       // "Spotify" or "Music"
+    var id: String
+    var title: String
+    var artist: String
+    var album: String
+    var artworkURL: String
+    var playing: Bool
+}
 
-    /// Called on the main thread when the track or play state changes (nil = nothing playing).
-    var onChange: ((Track?) -> Void)?
-    /// Called on the main thread when album art for the current track has loaded.
-    var onArtwork: ((NSImage, _ hue: Float?) -> Void)?
+/// A music app Wavedrop can follow: how to notice changes, query the track and find cover art.
+enum MusicPlayer: CaseIterable {
+    case spotify, music
 
-    private(set) var track: Track?
-    private let queue = DispatchQueue(label: "wavedrop.spotify")
-    private var timer: Timer?
-    private var artworkFor = ""
-    private static let bundleID = "com.spotify.client"
+    var name: String { self == .spotify ? "Spotify" : "Music" }
+    var bundleID: String { self == .spotify ? "com.spotify.client" : "com.apple.Music" }
+    var notification: String { self == .spotify ? "com.spotify.client.PlaybackStateChanged" : "com.apple.Music.playerInfo" }
 
-    private let script = NSAppleScript(source: """
-        if application id "com.spotify.client" is running then
-            tell application id "com.spotify.client"
+    /// Returns "state\nid\ntitle\nartist\nalbum\nartworkURL" or "" when nothing is loaded.
+    var scriptSource: String {
+        let (idProp, artProp) = self == .spotify ? ("id of t", "artwork url of t") : ("persistent ID of t", "\"\"")
+        return """
+        if application id "\(bundleID)" is running then
+            tell application id "\(bundleID)"
                 if player state is stopped then return ""
                 set t to current track
-                return (player state as string) & linefeed & (id of t) & linefeed & (name of t) & linefeed & ¬
-                    (artist of t) & linefeed & (album of t) & linefeed & (artwork url of t)
+                return (player state as string) & linefeed & (\(idProp)) & linefeed & (name of t) & linefeed & ¬
+                    (artist of t) & linefeed & (album of t) & linefeed & (\(artProp))
             end tell
         end if
         return ""
-        """)
+        """
+    }
+}
+
+/// Watches one music app for the current track and its album art.
+/// Uses the app's playback notification as the trigger and its AppleScript dictionary for details
+/// (needs a one-time "Wavedrop wants to control …" Automation permission per app).
+final class PlayerWatcher {
+    let player: MusicPlayer
+    /// Called on the main thread when the track or play state changes (nil = nothing loaded).
+    var onChange: ((NowPlayingTrack?) -> Void)?
+    /// Called on the main thread when album art for the current track has loaded.
+    var onArtwork: ((NSImage, _ hue: Float?) -> Void)?
+
+    private(set) var track: NowPlayingTrack?
+    private(set) var artwork: (image: NSImage, hue: Float?)?
+    private let queue: DispatchQueue
+    private var timer: Timer?
+    private var artworkFor = ""
+    private let script: NSAppleScript?
+
+    init(_ player: MusicPlayer) {
+        self.player = player
+        queue = DispatchQueue(label: "wavedrop.\(player.name)")
+        script = NSAppleScript(source: player.scriptSource)
+    }
 
     func start() {
         DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("com.spotify.client.PlaybackStateChanged"), object: nil, queue: .main
+            forName: Notification.Name(player.notification), object: nil, queue: .main
         ) { [weak self] _ in self?.refresh() }
-        // Fallback poll in case a notification is missed (only talks to Spotify while it's running).
+        // Fallback poll in case a notification is missed (only talks to the app while it's running).
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refresh() }
         refresh()
     }
 
     func refresh() {
-        guard NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == Self.bundleID }) else {
+        guard NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == player.bundleID }) else {
             publish(nil)
             return
         }
@@ -54,38 +76,61 @@ final class SpotifyNowPlaying {
             guard let self, let script = self.script else { return }
             var err: NSDictionary?
             let out = script.executeAndReturnError(&err).stringValue ?? ""
-            if let err { debugLog("Spotify query failed: \(err)") }
+            if let err { debugLog("\(self.player.name) query failed: \(err)") }
             let parts = out.components(separatedBy: "\n")
-            let t: Track? = parts.count >= 6
-                ? Track(id: parts[1], title: parts[2], artist: parts[3], album: parts[4], artworkURL: parts[5],
-                        playing: parts[0] == "playing")
+            let t: NowPlayingTrack? = parts.count >= 6
+                ? NowPlayingTrack(player: self.player.name, id: parts[1], title: parts[2], artist: parts[3],
+                                  album: parts[4], artworkURL: parts[5], playing: parts[0] == "playing")
                 : nil
             DispatchQueue.main.async { self.publish(t) }
         }
     }
 
-    private func publish(_ t: Track?) {
+    private func publish(_ t: NowPlayingTrack?) {
         guard t != track else { return }
         track = t
         onChange?(t)
         guard let t, t.id != artworkFor else { return }
         artworkFor = t.id
-        Self.artworkURL(for: t) { [weak self] url in
-            guard let url else { return }
-            URLSession.shared.dataTask(with: url) { data, _, _ in
-                guard let data, let img = NSImage(data: data) else { return }
-                let hue = Self.dominantHue(of: img)
-                DispatchQueue.main.async {
-                    guard self?.track?.id == t.id else { return }
-                    self?.onArtwork?(img, hue)
-                }
-            }.resume()
+        artwork = nil
+        loadArtwork(for: t) { [weak self] img in
+            guard let img else { return }
+            let hue = Self.dominantHue(of: img)
+            DispatchQueue.main.async {
+                guard let self, self.track?.id == t.id else { return }
+                self.artwork = (img, hue)
+                self.onArtwork?(img, hue)
+            }
         }
     }
 
-    /// Newer Spotify builds return an empty `artwork url` over AppleScript, so fall back to
+    private func loadArtwork(for t: NowPlayingTrack, completion: @escaping (NSImage?) -> Void) {
+        func fetch(_ url: URL?) {
+            guard let url else { return completion(nil) }
+            URLSession.shared.dataTask(with: url) { data, _, _ in completion(data.flatMap { NSImage(data: $0) }) }.resume()
+        }
+        switch player {
+        case .spotify:
+            Self.spotifyArtworkURL(for: t, completion: fetch)
+        case .music:
+            // Local/library tracks carry embedded art; streamed ones often don't, so fall back to
+            // the iTunes Search API by artist + album.
+            queue.async {
+                let s = NSAppleScript(source: """
+                    tell application id "com.apple.Music" to get raw data of artwork 1 of current track
+                    """)
+                var err: NSDictionary?
+                if let data = s?.executeAndReturnError(&err).data, let img = NSImage(data: data) {
+                    return completion(img)
+                }
+                Self.itunesArtworkURL(for: t, completion: fetch)
+            }
+        }
+    }
+
+    /// Newer Spotify builds often return an empty `artwork url` over AppleScript, so fall back to
     /// Spotify's public oEmbed endpoint, which gives the cover for a track ID.
-    private static func artworkURL(for t: Track, completion: @escaping (URL?) -> Void) {
+    private static func spotifyArtworkURL(for t: NowPlayingTrack, completion: @escaping (URL?) -> Void) {
         if !t.artworkURL.isEmpty, let url = URL(string: t.artworkURL) { return completion(url) }
         let parts = t.id.split(separator: ":")
         guard parts.count == 3, parts[0] == "spotify",
@@ -98,6 +143,20 @@ final class SpotifyNowPlaying {
                   var thumb = json["thumbnail_url"] as? String else { return completion(nil) }
             thumb = thumb.replacingOccurrences(of: "00001e02", with: "0000b273")   // 300 px → 640 px cover
             completion(URL(string: thumb))
+        }.resume()
+    }
+
+    private static func itunesArtworkURL(for t: NowPlayingTrack, completion: @escaping (URL?) -> Void) {
+        guard var c = URLComponents(string: "https://itunes.apple.com/search") else { return completion(nil) }
+        c.queryItems = [URLQueryItem(name: "term", value: "\(t.artist) \(t.album)"),
+                        URLQueryItem(name: "entity", value: "album"), URLQueryItem(name: "limit", value: "1")]
+        guard let api = c.url else { return completion(nil) }
+        URLSession.shared.dataTask(with: api) { data, _, _ in
+            guard let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let first = (json["results"] as? [[String: Any]])?.first,
+                  let art = first["artworkUrl100"] as? String else { return completion(nil) }
+            completion(URL(string: art.replacingOccurrences(of: "100x100", with: "600x600")))
         }.resume()
     }
 
@@ -124,6 +183,43 @@ final class SpotifyNowPlaying {
         guard total > Float(n * n) * 0.08 else { return nil }
         let hue = atan2(y, x) / (2 * .pi)
         return hue < 0 ? hue + 1 : hue
+    }
+}
+
+/// Follows Spotify and Apple Music together; whichever started playing most recently is "current".
+final class NowPlayingHub {
+    let watchers = MusicPlayer.allCases.map(PlayerWatcher.init)
+    var onChange: ((NowPlayingTrack?) -> Void)?
+    var onArtwork: ((NSImage, _ hue: Float?) -> Void)?
+    private var active: Int?
+
+    var track: NowPlayingTrack? { active.flatMap { watchers[$0].track } }
+
+    func start() {
+        for (i, w) in watchers.enumerated() {
+            w.onChange = { [weak self] t in self?.changed(i, t) }
+            w.onArtwork = { [weak self] img, hue in
+                if self?.active == i { self?.onArtwork?(img, hue) }
+            }
+            w.start()
+        }
+    }
+
+    private func changed(_ i: Int, _ t: NowPlayingTrack?) {
+        if t?.playing == true {
+            let switched = active != i
+            active = i
+            onChange?(t)
+            if switched, let art = watchers[i].artwork { onArtwork?(art.image, art.hue) }
+        } else if active == i || active == nil {
+            // Paused/stopped in the current player — unless the other one is playing right now.
+            if let other = watchers.indices.first(where: { $0 != i && watchers[$0].track?.playing == true }) {
+                active = other
+            } else {
+                active = t == nil ? nil : i
+            }
+            onChange?(track)
+        }
     }
 }
 
@@ -176,7 +272,7 @@ final class NowPlayingCard: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(_ t: SpotifyNowPlaying.Track) {
+    func show(_ t: NowPlayingTrack) {
         title.stringValue = t.title
         artist.stringValue = t.artist
         album.stringValue = t.album

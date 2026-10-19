@@ -5,6 +5,20 @@ if CommandLine.arguments.contains("--selftest") {
     SelfTest.run()
     exit(0)
 }
+if let i = CommandLine.arguments.firstIndex(of: "--record"), i + 2 < CommandLine.arguments.count {
+    RecordAnalyze.record(seconds: Double(CommandLine.arguments[i + 1]) ?? 30, path: CommandLine.arguments[i + 2])
+}
+if let i = CommandLine.arguments.firstIndex(of: "--analyze"), i + 1 < CommandLine.arguments.count {
+    RecordAnalyze.analyze(path: CommandLine.arguments[i + 1])
+}
+if let i = CommandLine.arguments.firstIndex(of: "--burst-test"), i + 1 < CommandLine.arguments.count {
+    do { try Snapshot.burstTest(path: CommandLine.arguments[i + 1]) } catch { print("burst test failed: \(error)") }
+    exit(0)
+}
+if let i = CommandLine.arguments.firstIndex(of: "--icon"), i + 1 < CommandLine.arguments.count {
+    do { try Snapshot.icon(path: CommandLine.arguments[i + 1]) } catch { print("icon failed: \(error)") }
+    exit(0)
+}
 if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
     do { try Snapshot.run(path: CommandLine.arguments[i + 1]) } catch { print("snapshot failed: \(error)") }
     exit(0)
@@ -35,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
          L             lock preset
          F  Return     full screen   (Esc exits)
          H             pin status panel
-         N             pin song info (Spotify)
+         N             pin song info
          [  ]          beat sync −/+ 10 ms
          K             hide these keys
         """)
@@ -46,13 +60,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let startTime = CACurrentMediaTime()
     private var captureError: String?
     private let defaults = UserDefaults.standard
-    private let spotify = SpotifyNowPlaying()
+    private let nowPlaying = NowPlayingHub()
     private let card = NowPlayingCard()
     private var cardPinned = false
     private var cardVisibleUntil: CFTimeInterval = 0
     private var cardShown = false
 
-    // Auto full screen: wake when Spotify starts playing, return when it has been stopped a while.
+    // Auto full screen: wake when Spotify / Music starts playing (or any audio, if enabled), return when it has been stopped a while.
     private enum ReturnTo { case none, windowed, background }
     private var backgroundMode = false
     private var returnTo = ReturnTo.none
@@ -63,6 +77,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var idleTimer: Timer?
     private let stopGrace: CFTimeInterval = 20
     private var autoFullscreen: Bool { defaults.object(forKey: "autoFullscreen") as? Bool ?? true }
+    private var anyAudio: Bool { defaults.bool(forKey: "wakeOnAnyAudio") }
+    private var anyAudioSince: CFTimeInterval?
+    private var needQuietBeforeWake = false
+    private var lastSoundTime: CFTimeInterval = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -149,13 +167,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             card.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
         ])
         cardPinned = defaults.bool(forKey: "pinSongInfo")
-        spotify.onChange = { [weak self] t in self?.trackChanged(t) }
-        spotify.onArtwork = { [weak self] img, hue in
+        nowPlaying.onChange = { [weak self] t in self?.trackChanged(t) }
+        nowPlaying.onArtwork = { [weak self] img, hue in
             self?.card.setArtwork(img)
             debugLog("artwork loaded \(Int(img.size.width))px, hue \(hue.map { String(format: "%.2f", $0) } ?? "none")")
             self?.renderer.director.artHue = hue
         }
-        spotify.start()
+        nowPlaying.start()
 
         idleTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.checkIdle() }
         if startHidden {
@@ -181,7 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Hidden and idle: no window, no Dock icon, no audio capture; only listening for Spotify.
+    /// Hidden and idle: no window, no Dock icon, no audio capture; only listening for music players.
     private func enterBackground() {
         source.stop()
         view.isPaused = true
@@ -189,6 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.setActivationPolicy(.accessory)
         backgroundMode = true
         returnTo = .none
+        needQuietBeforeWake = true   // apps often keep the output open briefly; wait for real silence first
     }
 
     private func wake(fullscreen: Bool) {
@@ -226,11 +245,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func checkIdle() {
+        let now = CACurrentMediaTime()
+        if backgroundMode && anyAudio && autoFullscreen {
+            // "Any audio" trigger: the output device has been in use for 4 s straight.
+            if !OutputDevice.isRunning() {
+                needQuietBeforeWake = false
+                anyAudioSince = nil
+            } else if !needQuietBeforeWake {
+                if anyAudioSince == nil { anyAudioSince = now }
+                if now - anyAudioSince! >= 4 {
+                    anyAudioSince = nil
+                    debugLog("any-audio wake")
+                    returnTo = .background
+                    stoppedSince = nil
+                    wake(fullscreen: true)
+                    return
+                }
+            }
+        }
         guard returnTo != .none else { return }
-        if spotify.track?.playing == true {
+        let soundPlaying = anyAudio && now - lastSoundTime < 3
+        if nowPlaying.track?.playing == true || soundPlaying {
             stoppedSince = nil
         } else {
-            let now = CACurrentMediaTime()
             if stoppedSince == nil { stoppedSince = now }
             if now - stoppedSince! > stopGrace { returnFromAuto() }
         }
@@ -249,11 +286,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    private func trackChanged(_ t: SpotifyNowPlaying.Track?) {
+    private func trackChanged(_ t: NowPlayingTrack?) {
         playStateChanged(playing: t?.playing ?? false)
         guard let t else { return }
         card.show(t)
         if t.id != lastTrackID {
+            if t.playing && !lastTrackID.isEmpty { renderer.director.newTrack() }
             lastTrackID = t.id
             card.setArtwork(nil)
             renderer.director.artHue = nil
@@ -264,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func updateCard(_ now: CFTimeInterval) {
-        let playing = spotify.track?.playing ?? false
+        let playing = nowPlaying.track?.playing ?? false
         let want = playing && (cardPinned || now < cardVisibleUntil)
         guard want != cardShown else { return }
         cardShown = want
@@ -308,6 +346,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sender.state = openAtLogin ? .on : .off
     }
 
+    @objc private func toggleAnyAudio(_ sender: NSMenuItem) {
+        defaults.set(!anyAudio, forKey: "wakeOnAnyAudio")
+        sender.state = anyAudio ? .on : .off
+    }
+
     @objc private func toggleAutoFullscreen(_ sender: NSMenuItem) {
         defaults.set(!autoFullscreen, forKey: "autoFullscreen")
         sender.state = autoFullscreen ? .on : .off
@@ -323,10 +366,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Wavedrop", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
-        let auto = NSMenuItem(title: "Full Screen When Spotify Plays", action: #selector(toggleAutoFullscreen(_:)), keyEquivalent: "")
+        let auto = NSMenuItem(title: "Full Screen When Music Plays", action: #selector(toggleAutoFullscreen(_:)), keyEquivalent: "")
         auto.target = self
         auto.state = autoFullscreen ? .on : .off
         appMenu.addItem(auto)
+        let any = NSMenuItem(title: "Also Wake for Any Audio (browser, videos…)", action: #selector(toggleAnyAudio(_:)), keyEquivalent: "")
+        any.target = self
+        any.state = anyAudio ? .on : .off
+        appMenu.addItem(any)
         let login = NSMenuItem(title: "Open at Login (hidden until music plays)", action: #selector(toggleOpenAtLogin(_:)), keyEquivalent: "")
         login.target = self
         login.state = openAtLogin ? .on : .off
@@ -382,7 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func frame(_ f: AudioFeatures, _ d: Director) {
         let now = CACurrentMediaTime()
-        if !f.silent { heardAudio = true }
+        if !f.silent { heardAudio = true; lastSoundTime = now }
         if d.presetName != lastPreset {
             if !lastPreset.isEmpty { hudVisibleUntil = max(hudVisibleUntil, now + 2.5) }
             lastPreset = d.presetName
@@ -409,7 +456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let styleWord = d.styleValue > 0.5 ? "pulse" : "flow"
         let modeText = d.mode == .auto ? "Auto → \(styleWord) \(Int(d.styleValue * 100))%" : d.mode.rawValue
-        let dots = (0..<4).map { f.bpm > 0 && f.rhythm > 0.25 && $0 == f.beatCount % 4 ? "●" : "○" }.joined()
+        let dots = (0..<4).map { f.bpm > 0 && f.rhythm > 0.25 && $0 == f.beatInBar ? "●" : "○" }.joined()
         let tempo = f.bpm > 0 && f.rhythm > 0.25 ? String(format: "%5.1f BPM %@", f.bpm, dots) : "  free tempo"
         let bar = { (v: Float) in String(repeating: "▮", count: Int(min(1, v) * 10)).padding(toLength: 10, withPad: "·", startingAt: 0) }
         var lines = [
