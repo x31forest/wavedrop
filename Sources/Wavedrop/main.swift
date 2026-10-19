@@ -5,6 +5,10 @@ if CommandLine.arguments.contains("--selftest") {
     SelfTest.run()
     exit(0)
 }
+if let i = CommandLine.arguments.firstIndex(of: "--icon"), i + 1 < CommandLine.arguments.count {
+    do { try Snapshot.icon(path: CommandLine.arguments[i + 1]) } catch { print("icon failed: \(error)") }
+    exit(0)
+}
 if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
     do { try Snapshot.run(path: CommandLine.arguments[i + 1]) } catch { print("snapshot failed: \(error)") }
     exit(0)

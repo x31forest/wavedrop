@@ -54,4 +54,49 @@ enum Snapshot {
         CGImageDestinationFinalize(dest)
         print("wrote \(path)")
     }
+
+    /// `Wavedrop --icon out.png`: renders a 1024×1024 app icon (a preset frame in a rounded tile).
+    static func icon(path: String, preset name: String = "Kick Kaleidoscope") throws {
+        let device = MTLCreateSystemDefaultDevice()!
+        let n = 1024
+        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: n, height: n, mipmapped: false)
+        td.usage = [.renderTarget, .shaderRead]
+        td.storageMode = .shared
+        let target = device.makeTexture(descriptor: td)!
+        let r = try Renderer(device: device, pixelFormat: .bgra8Unorm, source: DemoSource())
+        r.director.mode = .electronic
+        r.director.select(presets.firstIndex { $0.name == name } ?? 0)
+        r.director.locked = true
+        var chunks: [[Float]] = []
+        var s = 0
+        for _ in 0..<300 {
+            chunks.append((0..<800).map { k in DemoSource.electronic(Double(s + k) / 48_000) })
+            s += 800
+        }
+        r.renderOffscreen(samples: chunks, dt: 1.0 / 60, size: CGSize(width: n, height: n), target: target)
+
+        var bytes = [UInt8](repeating: 0, count: n * n * 4)
+        target.getBytes(&bytes, bytesPerRow: n * 4, from: MTLRegionMake2D(0, 0, n, n), mipmapLevel: 0)
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        let frame = CGImage(width: n, height: n, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: n * 4, space: space,
+                            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                            provider: CGDataProvider(data: Data(bytes) as CFData)!, decode: nil, shouldInterpolate: true,
+                            intent: .defaultIntent)!
+        let ctx = CGContext(data: nil, width: n, height: n, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        // macOS icon grid: 824 pt tile centred in 1024, continuous-ish corners, soft drop shadow.
+        let tile = CGRect(x: 100, y: 100, width: 824, height: 824)
+        let shape = CGPath(roundedRect: tile, cornerWidth: 185, cornerHeight: 185, transform: nil)
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: -10), blur: 28, color: CGColor(gray: 0, alpha: 0.45))
+        ctx.addPath(shape); ctx.setFillColor(CGColor(gray: 0, alpha: 1)); ctx.fillPath()
+        ctx.restoreGState()
+        ctx.addPath(shape); ctx.clip()
+        ctx.draw(frame, in: tile.insetBy(dx: -60, dy: -60))
+        let out = ctx.makeImage()!
+        let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, UTType.png.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, out, nil)
+        CGImageDestinationFinalize(dest)
+        print("wrote \(path)")
+    }
 }
