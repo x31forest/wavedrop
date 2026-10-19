@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
          L             lock preset
          F  Return     full screen   (Esc exits)
          H             pin status panel
+         N             pin song info (Spotify)
          [  ]          beat sync −/+ 10 ms
          K             hide these keys
         """)
@@ -45,6 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let startTime = CACurrentMediaTime()
     private var captureError: String?
     private let defaults = UserDefaults.standard
+    private let spotify = SpotifyNowPlaying()
+    private let card = NowPlayingCard()
+    private var cardPinned = false
+    private var cardVisibleUntil: CFTimeInterval = 0
+    private var cardShown = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -118,10 +124,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             keysLabel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -18),
         ])
 
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.alphaValue = 0
+        view.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18),
+            card.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+        ])
+        cardPinned = defaults.bool(forKey: "pinSongInfo")
+        spotify.onChange = { [weak self] t in self?.trackChanged(t) }
+        spotify.onArtwork = { [weak self] img, hue in
+            self?.card.setArtwork(img)
+            self?.renderer.director.artHue = hue
+        }
+        spotify.start()
+
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(view)
         NSApp.activate(ignoringOtherApps: true)
         if CommandLine.arguments.contains("--fullscreen") { window.toggleFullScreen(nil) }
+    }
+
+    private var lastTrackID = ""
+
+    private func trackChanged(_ t: SpotifyNowPlaying.Track?) {
+        guard let t else { return }
+        card.show(t)
+        if t.id != lastTrackID {
+            lastTrackID = t.id
+            card.setArtwork(nil)
+            renderer.director.artHue = nil
+            cardVisibleUntil = CACurrentMediaTime() + 10
+        } else if t.playing {
+            cardVisibleUntil = max(cardVisibleUntil, CACurrentMediaTime() + 4)   // resumed
+        }
+    }
+
+    private func updateCard(_ now: CFTimeInterval) {
+        let playing = spotify.track?.playing ?? false
+        let want = playing && (cardPinned || now < cardVisibleUntil)
+        guard want != cardShown else { return }
+        cardShown = want
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = want ? 0.6 : 1.2
+            card.animator().alphaValue = want ? 1 : 0
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -161,6 +208,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defaults.set(d.mode.rawValue, forKey: "mode")
         case ("l", _): d.locked.toggle()
         case ("h", _): hudPinned.toggle()
+        case ("n", _):
+            cardPinned.toggle()
+            defaults.set(cardPinned, forKey: "pinSongInfo")
+            if !cardPinned { cardVisibleUntil = 0 }
         case ("k", _):
             keysLabel.isHidden.toggle()
             defaults.set(keysLabel.isHidden, forKey: "hideKeys")
@@ -180,6 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             lastPreset = d.presetName
         }
         if window.styleMask.contains(.fullScreen), Int(now * 2) % 6 == 0 { NSCursor.setHiddenUntilMouseMoves(true) }
+        updateCard(now)
         guard now - lastHudUpdate > 0.1 else { return }
         lastHudUpdate = now
 

@@ -24,6 +24,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>LSMinimumSystemVersion</key><string>14.2</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Wavedrop asks Spotify for the current song and album art to show over the visuals.</string>
     <key>NSAudioCaptureUsageDescription</key>
     <string>Wavedrop listens to the music playing on your Mac to drive the visuals. Audio never leaves your computer.</string>
 </dict>
