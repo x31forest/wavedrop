@@ -5,8 +5,10 @@ A MilkDrop-style music visualizer for macOS (14.2+). It listens to whatever your
 ## Build & run
 
 ```bash
-./build.sh && open build/Wavedrop.app
+./build.sh && open /Applications/Wavedrop.app
 ```
+
+`build.sh` builds `build/Wavedrop.app` and installs a copy into `/Applications`, quitting a running copy first. Pass `--no-install` to only build.
 
 On first launch macOS asks for **System Audio Recording** permission. If you miss the prompt, enable Wavedrop under System Settings › Privacy & Security › Screen & System Audio Recording › System Audio Recording Only, then relaunch. After a rebuild macOS may ask again because the app is ad-hoc signed.
 

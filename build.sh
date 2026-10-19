@@ -32,3 +32,11 @@ PLIST
 
 codesign --force --sign - "$APP"
 echo "Built $APP"
+
+# Install into /Applications (quit a running copy first so it can be replaced).
+if [[ "$1" != "--no-install" ]]; then
+    pkill -x Wavedrop && sleep 1 || true
+    rm -rf /Applications/Wavedrop.app
+    ditto "$APP" /Applications/Wavedrop.app
+    echo "Installed /Applications/Wavedrop.app"
+fi
