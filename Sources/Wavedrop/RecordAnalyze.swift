@@ -74,8 +74,8 @@ enum RecordAnalyze {
             lastKick = f.kick
             if t >= nextReport {
                 nextReport += 5
-                print(String(format: "  %5.1fs  bpm %6.1f  rhythm %.2f  loud %.2f  bar beat %d  bars %d",
-                             t, f.bpm, f.rhythm, f.loudness, f.beatInBar, f.barCount))
+                print(String(format: "  %5.1fs  bpm %6.1f  rhythm %.2f (clarity %.2f peaky %.2f)  loud %.2f  bar beat %d  bars %d",
+                             t, f.bpm, f.rhythm, a.debugClarity, a.debugPeaky, f.loudness, f.beatInBar, f.barCount))
             }
         }
         // How well do predicted beats line up with real kicks? (median |offset| to the nearest kick)

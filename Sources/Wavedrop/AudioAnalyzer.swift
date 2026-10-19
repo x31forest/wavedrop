@@ -268,7 +268,9 @@ final class AudioAnalyzer {
             estimateTempo()
         }
         if silent { rhythmTarget = 0 }
-        rhythm += (rhythmTarget - rhythm) * (1 - exp(-1 / (frameRate * 2.5)))
+        // Rise in ~2.5 s, fall in ~8 s: a few fuzzy bars shouldn't flip the style.
+        let tau: Float = rhythmTarget > rhythm ? 2.5 : 8
+        rhythm += (rhythmTarget - rhythm) * (1 - exp(-1 / (frameRate * tau)))
 
         // Beat clock.
         if bpm > 0 {
@@ -441,7 +443,10 @@ final class AudioAnalyzer {
         let envMean = env.reduce(0, +) / Float(n)
         let peaky = sqrt(eAll.reduce(0) { $0 + $1 * $1 } / Float(n)) / max(envMean, 1e-6)
         debugClarity = clarity; debugPeaky = peaky
-        rhythmTarget = min(1, max(0, (clarity - 0.06) / 0.22)) * min(1, max(0, (peaky - 0.15) / 0.25))
+        // Calibrated on real recordings: steady electronic beats land around 0.10–0.20, while
+        // free-flowing music and noise stay below ~0.03.
+        let x = min(1, max(0, (clarity - 0.035) / 0.085))
+        rhythmTarget = x * x * (3 - 2 * x)
 
         let cand = 60 * frameRate / lag
         // Free-flowing music: keep the last tempo but don't chase noise.
@@ -496,7 +501,7 @@ final class AudioAnalyzer {
             print(String(format: "t %.2f bpm %.2f cand %.2f off %d period %.2f target %.3f frac %.3f err %+.3f",
                          t, bpm, cand, bestOff, period, target, clockFrac, err))
         }
-        phase += err * 0.3
+        phase += err * 0.18
     }
 
     // MARK: - Output

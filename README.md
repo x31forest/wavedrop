@@ -29,7 +29,7 @@ Wavedrop remembers your last settings between launches: style mode, preset, lock
 
 ## Spotify song info
 
-When the Spotify desktop app is playing, Wavedrop shows the song title, artist, album and cover art in the top-left corner for 10 seconds whenever the track changes (press **N** to keep it on screen). The visuals' colours also lean toward the cover's dominant colour. The first time, macOS asks whether Wavedrop may control Spotify; it only reads the current track.
+When Spotify or Apple Music is playing, Wavedrop shows the song title, artist, album and cover art in the top-left corner for 10 seconds whenever the track changes (press **N** to keep it on screen). The visuals' colours also lean toward the cover's dominant colour. The first time, macOS asks whether Wavedrop may control Spotify; it only reads the current track.
 
 ## Full screen when Spotify plays
 
@@ -42,8 +42,15 @@ Wavedrop installs a login item that starts it hidden in the background: no windo
   - *Pulse (electronic):* zoom and rotation kicks on every beat, flashes on downbeats, preset changes on 16-beat phrase boundaries, and a hard cut plus flash when a drop hits after a breakdown.
   - *Flow (classical):* motion speed follows the dynamics (calm in pianissimo, wild in fortissimo), note onsets cause soft ripples, colours follow the harmony (dominant pitch classes on the circle of fifths), and presets morph slowly over 6–9 s at section changes.
 
+## Signing (one-time)
+
+Run `scripts/make-signing-cert.sh` once. It creates a local code-signing certificate so macOS keeps Wavedrop's audio and Automation permissions across rebuilds. Without it, `build.sh` falls back to ad-hoc signing. `scripts/make-icon.sh` regenerates the app icon from a rendered frame.
+
 ## Developer flags
 
 - `--demo` uses a built-in synthetic signal instead of system audio.
 - `--selftest` prints the tempo, phase and style detected on synthetic test signals.
 - `--snapshot out.png` renders every preset offscreen into one contact sheet.
+- `--record <seconds> <out.wav>` captures system audio. Run it as `open -a /Applications/Wavedrop.app --args --record 40 /path/clip.wav` so the app's own permission applies.
+- `--analyze <file>` reports tempo, rhythm score, bar position and beat-vs-kick alignment for an audio file.
+- `--burst-test out.png` renders frames before and during the track-change shockwave.
