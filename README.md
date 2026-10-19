@@ -25,6 +25,8 @@ On first launch macOS asks for **System Audio Recording** permission. If you mis
 | [ / ] | nudge beat sync −/+10 ms |
 | N | keep the Spotify song info on screen (otherwise it shows for 10 s per track) |
 
+Wavedrop remembers your last settings between launches: style mode, preset, lock, pinned panels, shortcut list, beat-sync offset, window size and full screen.
+
 ## Spotify song info
 
 When the Spotify desktop app is playing, Wavedrop shows the song title, artist, album and cover art in the top-left corner for 10 seconds whenever the track changes (press **N** to keep it on screen). The visuals' colours also lean toward the cover's dominant colour. The first time, macOS asks whether Wavedrop may control Spotify; it only reads the current track.

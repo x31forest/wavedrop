@@ -92,6 +92,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if let m = defaults.string(forKey: "mode"), let mode = StyleMode(rawValue: m) { renderer.director.mode = mode }
         if defaults.object(forKey: "latency") != nil { renderer.analyzer.latencyCompensation = defaults.double(forKey: "latency") }
+        if let name = defaults.string(forKey: "preset"), let i = presets.firstIndex(where: { $0.name == name }) {
+            renderer.director.select(i)
+        }
+        renderer.director.locked = defaults.bool(forKey: "locked")
+        hudPinned = defaults.bool(forKey: "pinHUD")
         view.delegate = renderer
         renderer.mtkView(view, drawableSizeWillChange: view.drawableSize)
         renderer.onFrame = { [weak self] f, d in self?.frame(f, d) }
@@ -142,7 +147,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(view)
         NSApp.activate(ignoringOtherApps: true)
-        if CommandLine.arguments.contains("--fullscreen") { window.toggleFullScreen(nil) }
+        if CommandLine.arguments.contains("--fullscreen") || defaults.bool(forKey: "fullscreen") {
+            window.toggleFullScreen(nil)
+        }
     }
 
     private var lastTrackID = ""
@@ -170,6 +177,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             card.animator().alphaValue = want ? 1 : 0
         }
     }
+
+    func windowDidEnterFullScreen(_ notification: Notification) { defaults.set(true, forKey: "fullscreen") }
+    func windowDidExitFullScreen(_ notification: Notification) { defaults.set(false, forKey: "fullscreen") }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ notification: Notification) { source?.stop() }
@@ -206,8 +216,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case ("m", _):
             d.mode = d.mode.next
             defaults.set(d.mode.rawValue, forKey: "mode")
-        case ("l", _): d.locked.toggle()
-        case ("h", _): hudPinned.toggle()
+        case ("l", _):
+            d.locked.toggle()
+            defaults.set(d.locked, forKey: "locked")
+        case ("h", _):
+            hudPinned.toggle()
+            defaults.set(hudPinned, forKey: "pinHUD")
         case ("n", _):
             cardPinned.toggle()
             defaults.set(cardPinned, forKey: "pinSongInfo")
@@ -229,6 +243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if d.presetName != lastPreset {
             if !lastPreset.isEmpty { hudVisibleUntil = max(hudVisibleUntil, now + 2.5) }
             lastPreset = d.presetName
+            defaults.set(d.presetName, forKey: "preset")
         }
         if window.styleMask.contains(.fullScreen), Int(now * 2) % 6 == 0 { NSCursor.setHiddenUntilMouseMoves(true) }
         updateCard(now)
