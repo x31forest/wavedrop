@@ -28,6 +28,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var source: AudioSource!
     private let hud = NSTextField(labelWithString: "")
     private var hudPinned = false
+    /// Always-on shortcut cheat sheet (bottom right), toggled with K.
+    private let keysLabel = NSTextField(labelWithString: """
+         ←  →  Space   change preset
+         M             style: Auto / Electronic / Classical
+         L             lock preset
+         F  Return     full screen   (Esc exits)
+         H             pin status panel
+         N             pin song info (Spotify)
+         [  ]          beat sync −/+ 10 ms
+         K             hide these keys
+        """)
     private var hudVisibleUntil = CACurrentMediaTime() + 8
     private var lastHudUpdate: CFTimeInterval = 0
     private var lastPreset = ""
@@ -35,15 +46,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let startTime = CACurrentMediaTime()
     private var captureError: String?
     private let defaults = UserDefaults.standard
+    private let spotify = SpotifyNowPlaying()
+    private let card = NowPlayingCard()
+    private var cardPinned = false
+    private var cardVisibleUntil: CFTimeInterval = 0
+    private var cardShown = false
+
+    // Auto full screen: wake when Spotify starts playing, return when it has been stopped a while.
+    private enum ReturnTo { case none, windowed, background }
+    private var backgroundMode = false
+    private var returnTo = ReturnTo.none
+    private var pendingAfterExit = ReturnTo.none
+    private var wasPlaying = false
+    private var sawFirstPlayState = false
+    private var stoppedSince: CFTimeInterval?
+    private var idleTimer: Timer?
+    private let stopGrace: CFTimeInterval = 20
+    private var autoFullscreen: Bool { defaults.object(forKey: "autoFullscreen") as? Bool ?? true }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
 
         let demo = CommandLine.arguments.contains("--demo")
+        let startHidden = CommandLine.arguments.contains("--background")
         source = demo ? DemoSource() : SystemAudioTap()
-        do { try source.start() } catch {
-            captureError = error.localizedDescription
-        }
+        if !startHidden { startCapture() }
+        LoginItem.sync(enabled: openAtLogin)
 
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 760),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -76,6 +104,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if let m = defaults.string(forKey: "mode"), let mode = StyleMode(rawValue: m) { renderer.director.mode = mode }
         if defaults.object(forKey: "latency") != nil { renderer.analyzer.latencyCompensation = defaults.double(forKey: "latency") }
+        if let name = defaults.string(forKey: "preset"), let i = presets.firstIndex(where: { $0.name == name }) {
+            renderer.director.select(i)
+        }
+        renderer.director.locked = defaults.bool(forKey: "locked")
+        hudPinned = defaults.bool(forKey: "pinHUD")
         view.delegate = renderer
         renderer.mtkView(view, drawableSizeWillChange: view.drawableSize)
         renderer.onFrame = { [weak self] f, d in self?.frame(f, d) }
@@ -94,13 +127,193 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hud.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -18),
         ])
 
+        keysLabel.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+        keysLabel.textColor = NSColor(white: 1, alpha: 0.85)
+        keysLabel.wantsLayer = true
+        keysLabel.layer?.backgroundColor = NSColor(white: 0, alpha: 0.45).cgColor
+        keysLabel.layer?.cornerRadius = 8
+        keysLabel.maximumNumberOfLines = 0
+        keysLabel.translatesAutoresizingMaskIntoConstraints = false
+        keysLabel.isHidden = defaults.bool(forKey: "hideKeys")
+        view.addSubview(keysLabel)
+        NSLayoutConstraint.activate([
+            keysLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
+            keysLabel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -18),
+        ])
+
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.alphaValue = 0
+        view.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18),
+            card.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+        ])
+        cardPinned = defaults.bool(forKey: "pinSongInfo")
+        spotify.onChange = { [weak self] t in self?.trackChanged(t) }
+        spotify.onArtwork = { [weak self] img, hue in
+            self?.card.setArtwork(img)
+            debugLog("artwork loaded \(Int(img.size.width))px, hue \(hue.map { String(format: "%.2f", $0) } ?? "none")")
+            self?.renderer.director.artHue = hue
+        }
+        spotify.start()
+
+        idleTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.checkIdle() }
+        if startHidden {
+            enterBackground()
+            return
+        }
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(view)
         NSApp.activate(ignoringOtherApps: true)
-        if CommandLine.arguments.contains("--fullscreen") { window.toggleFullScreen(nil) }
+        if CommandLine.arguments.contains("--fullscreen") || defaults.bool(forKey: "fullscreen") {
+            window.toggleFullScreen(nil)
+        }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    private var lastTrackID = ""
+
+    private func startCapture() {
+        do {
+            try source.start()
+            captureError = nil
+        } catch {
+            captureError = error.localizedDescription
+        }
+    }
+
+    /// Hidden and idle: no window, no Dock icon, no audio capture; only listening for Spotify.
+    private func enterBackground() {
+        source.stop()
+        view.isPaused = true
+        window.orderOut(nil)
+        NSApp.setActivationPolicy(.accessory)
+        backgroundMode = true
+        returnTo = .none
+    }
+
+    private func wake(fullscreen: Bool) {
+        if backgroundMode {
+            backgroundMode = false
+            startCapture()
+            view.isPaused = false
+            NSApp.setActivationPolicy(.regular)
+        }
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        window.makeFirstResponder(view)
+        NSApp.activate(ignoringOtherApps: true)
+        if fullscreen && !window.styleMask.contains(.fullScreen) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let self, !self.window.styleMask.contains(.fullScreen) else { return }
+                self.window.toggleFullScreen(nil)
+            }
+        }
+    }
+
+    private func playStateChanged(playing: Bool) {
+        defer { wasPlaying = playing; sawFirstPlayState = true }
+        if playing != wasPlaying { debugLog("play state -> \(playing ? "playing" : "not playing"), background \(backgroundMode)") }
+        guard playing, !wasPlaying, autoFullscreen else { return }
+        // At normal launch, don't react to music that was already playing — only to it starting.
+        guard sawFirstPlayState || backgroundMode else { return }
+        if backgroundMode {
+            returnTo = .background
+        } else if !window.styleMask.contains(.fullScreen) {
+            returnTo = .windowed
+        }
+        stoppedSince = nil
+        wake(fullscreen: true)
+    }
+
+    private func checkIdle() {
+        guard returnTo != .none else { return }
+        if spotify.track?.playing == true {
+            stoppedSince = nil
+        } else {
+            let now = CACurrentMediaTime()
+            if stoppedSince == nil { stoppedSince = now }
+            if now - stoppedSince! > stopGrace { returnFromAuto() }
+        }
+    }
+
+    /// Undo an automatic take-over: leave full screen and, if we were hidden before, hide again.
+    private func returnFromAuto() {
+        let target = returnTo
+        returnTo = .none
+        stoppedSince = nil
+        if window.styleMask.contains(.fullScreen) {
+            pendingAfterExit = target
+            window.toggleFullScreen(nil)
+        } else if target == .background {
+            enterBackground()
+        }
+    }
+
+    private func trackChanged(_ t: SpotifyNowPlaying.Track?) {
+        playStateChanged(playing: t?.playing ?? false)
+        guard let t else { return }
+        card.show(t)
+        if t.id != lastTrackID {
+            lastTrackID = t.id
+            card.setArtwork(nil)
+            renderer.director.artHue = nil
+            cardVisibleUntil = CACurrentMediaTime() + 10
+        } else if t.playing {
+            cardVisibleUntil = max(cardVisibleUntil, CACurrentMediaTime() + 4)   // resumed
+        }
+    }
+
+    private func updateCard(_ now: CFTimeInterval) {
+        let playing = spotify.track?.playing ?? false
+        let want = playing && (cardPinned || now < cardVisibleUntil)
+        guard want != cardShown else { return }
+        cardShown = want
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = want ? 0.6 : 1.2
+            card.animator().alphaValue = want ? 1 : 0
+        }
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        if returnTo == .none { defaults.set(true, forKey: "fullscreen") }
+    }
+    func windowDidExitFullScreen(_ notification: Notification) {
+        let after = pendingAfterExit
+        pendingAfterExit = .none
+        if after == .background {
+            enterBackground()
+        } else if after == .none {
+            defaults.set(false, forKey: "fullscreen")
+        }
+    }
+
+    /// With open-at-login on, closing the window just hides Wavedrop so it can wake for music later.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard openAtLogin else { return true }
+        enterBackground()
+        return false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        returnTo = .none
+        wake(fullscreen: defaults.bool(forKey: "fullscreen"))
+        return true
+    }
+
+    private var openAtLogin: Bool { defaults.object(forKey: "openAtLogin") as? Bool ?? true }
+
+    @objc private func toggleOpenAtLogin(_ sender: NSMenuItem) {
+        defaults.set(!openAtLogin, forKey: "openAtLogin")
+        LoginItem.sync(enabled: openAtLogin)
+        sender.state = openAtLogin ? .on : .off
+    }
+
+    @objc private func toggleAutoFullscreen(_ sender: NSMenuItem) {
+        defaults.set(!autoFullscreen, forKey: "autoFullscreen")
+        sender.state = autoFullscreen ? .on : .off
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !openAtLogin }
     func applicationWillTerminate(_ notification: Notification) { source?.stop() }
 
     private func buildMenu() {
@@ -109,6 +322,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         main.addItem(appItem)
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Wavedrop", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        let auto = NSMenuItem(title: "Full Screen When Spotify Plays", action: #selector(toggleAutoFullscreen(_:)), keyEquivalent: "")
+        auto.target = self
+        auto.state = autoFullscreen ? .on : .off
+        appMenu.addItem(auto)
+        let login = NSMenuItem(title: "Open at Login (hidden until music plays)", action: #selector(toggleOpenAtLogin(_:)), keyEquivalent: "")
+        login.target = self
+        login.state = openAtLogin ? .on : .off
+        appMenu.addItem(login)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Wavedrop", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quit Wavedrop", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -130,13 +352,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         switch (chars, e.keyCode) {
         case (_, 123): d.previous()                        // ←
         case (_, 124), (" ", _): d.next()                   // → / space
-        case (_, 53): if window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }   // esc
+        case (_, 53):                                       // esc
+            if returnTo != .none { returnFromAuto() }
+            else if window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
         case (_, 36), ("f", _): window.toggleFullScreen(nil)    // return / f
         case ("m", _):
             d.mode = d.mode.next
             defaults.set(d.mode.rawValue, forKey: "mode")
-        case ("l", _): d.locked.toggle()
-        case ("h", _): hudPinned.toggle()
+        case ("l", _):
+            d.locked.toggle()
+            defaults.set(d.locked, forKey: "locked")
+        case ("h", _):
+            hudPinned.toggle()
+            defaults.set(hudPinned, forKey: "pinHUD")
+        case ("n", _):
+            cardPinned.toggle()
+            defaults.set(cardPinned, forKey: "pinSongInfo")
+            if !cardPinned { cardVisibleUntil = 0 }
+        case ("k", _):
+            keysLabel.isHidden.toggle()
+            defaults.set(keysLabel.isHidden, forKey: "hideKeys")
         case ("[", _): renderer.adjustLatency(by: -0.01); defaults.set(renderer.analyzer.latencyCompensation, forKey: "latency")
         case ("]", _): renderer.adjustLatency(by: 0.01); defaults.set(renderer.analyzer.latencyCompensation, forKey: "latency")
         default: handled = false
@@ -151,8 +386,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if d.presetName != lastPreset {
             if !lastPreset.isEmpty { hudVisibleUntil = max(hudVisibleUntil, now + 2.5) }
             lastPreset = d.presetName
+            defaults.set(d.presetName, forKey: "preset")
         }
         if window.styleMask.contains(.fullScreen), Int(now * 2) % 6 == 0 { NSCursor.setHiddenUntilMouseMoves(true) }
+        updateCard(now)
         guard now - lastHudUpdate > 0.1 else { return }
         lastHudUpdate = now
 
@@ -180,7 +417,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             " Style: \(modeText)    \(tempo)",
             " Level \(bar(f.loudness))  Bass \(bar(f.bassAtt / 2))  Treble \(bar(f.trebAtt / 2))",
             String(format: " Sync offset %+.0f ms", renderer.analyzer.latencyCompensation * 1000),
-            " ←/→ preset · M style · L lock · F fullscreen · H HUD · [ ] sync ",
         ]
         if let problem { lines.insert(" " + problem.replacingOccurrences(of: "\n", with: "\n "), at: 0) }
         lines.append(" " + source.statusText + " ")

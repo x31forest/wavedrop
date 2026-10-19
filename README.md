@@ -20,8 +20,20 @@ On first launch macOS asks for **System Audio Recording** permission. If you mis
 | M | style: Auto → Electronic → Classical |
 | L | lock the current preset |
 | F / Return / double-click | full screen (Esc exits) |
-| H | pin the HUD |
+| H | pin the status panel |
+| K | show / hide the on-screen shortcut list (shown by default) |
 | [ / ] | nudge beat sync −/+10 ms |
+| N | keep the Spotify song info on screen (otherwise it shows for 10 s per track) |
+
+Wavedrop remembers your last settings between launches: style mode, preset, lock, pinned panels, shortcut list, beat-sync offset, window size and full screen.
+
+## Spotify song info
+
+When the Spotify desktop app is playing, Wavedrop shows the song title, artist, album and cover art in the top-left corner for 10 seconds whenever the track changes (press **N** to keep it on screen). The visuals' colours also lean toward the cover's dominant colour. The first time, macOS asks whether Wavedrop may control Spotify; it only reads the current track.
+
+## Full screen when Spotify plays
+
+Wavedrop installs a login item that starts it hidden in the background: no window, no Dock icon and no audio capture. When Spotify starts playing, Wavedrop opens full screen. After Spotify has been paused or stopped for 20 seconds, it leaves full screen and hides again. **Esc** sends it back right away. Closing the window also just hides it; **⌘Q** quits until the next login. Both behaviours can be turned off in the app menu (*Full Screen When Spotify Plays*, *Open at Login*). The login item is `~/Library/LaunchAgents/local.wavedrop.visualizer.login.plist` and is only installed for the copy in `/Applications`. Background events are logged to `~/Library/Logs/Wavedrop.log`.
 
 ## How it handles different genres
 

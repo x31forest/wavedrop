@@ -121,6 +121,10 @@ final class Director {
     private var rotSign: Float = 1
     private var beatSmooth: Float = 0
     private(set) var lastEvent = ""
+    /// Dominant hue of the current album art (from Spotify), if any. Pulls the palette toward the cover.
+    var artHue: Float?
+    private var artPull: Float = 0
+    private var artHueSmooth: Float = 0
 
     init() {
         currentIndex = Int.random(in: 0..<presets.count)
@@ -230,7 +234,16 @@ final class Director {
         beatSmooth = max(beatTarget, beatSmooth * Float(exp(-dt / 0.08)))
 
         // Color: electronic drifts freely; classical leans toward the harmony's key color and brightness.
-        let freeHue = hueOffset + Float(time * 0.01)
+        var freeHue = hueOffset + Float(time * 0.01)
+        if let artHue {
+            var da = artHue - artHueSmooth
+            da -= da.rounded()
+            artHueSmooth += da * Float(1 - exp(-dt / 2))
+        }
+        artPull += ((artHue == nil ? 0 : 0.65) - artPull) * Float(1 - exp(-dt / 3))
+        var dArt = artHueSmooth + 0.06 * Float(sin(time * 0.07)) - freeHue
+        dArt -= dArt.rounded()
+        freeHue += dArt * artPull
         let keyHue = f.keyHue + 0.15 * (f.centroid - 0.5)
         var d = keyHue - freeHue
         d -= d.rounded()
