@@ -20,7 +20,8 @@ On first launch macOS asks for **System Audio Recording** permission. If you mis
 | M | style: Auto → Electronic → Classical |
 | L | lock the current preset |
 | F / Return / double-click | full screen (Esc exits) |
-| H | pin the HUD |
+| H | pin the status panel |
+| K | show / hide the on-screen shortcut list (shown by default) |
 | [ / ] | nudge beat sync −/+10 ms |
 
 ## How it handles different genres

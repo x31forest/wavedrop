@@ -28,6 +28,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var source: AudioSource!
     private let hud = NSTextField(labelWithString: "")
     private var hudPinned = false
+    /// Always-on shortcut cheat sheet (bottom right), toggled with K.
+    private let keysLabel = NSTextField(labelWithString: """
+         ←  →  Space   change preset
+         M             style: Auto / Electronic / Classical
+         L             lock preset
+         F  Return     full screen   (Esc exits)
+         H             pin status panel
+         [  ]          beat sync −/+ 10 ms
+         K             hide these keys
+        """)
     private var hudVisibleUntil = CACurrentMediaTime() + 8
     private var lastHudUpdate: CFTimeInterval = 0
     private var lastPreset = ""
@@ -94,6 +104,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hud.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -18),
         ])
 
+        keysLabel.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+        keysLabel.textColor = NSColor(white: 1, alpha: 0.85)
+        keysLabel.wantsLayer = true
+        keysLabel.layer?.backgroundColor = NSColor(white: 0, alpha: 0.45).cgColor
+        keysLabel.layer?.cornerRadius = 8
+        keysLabel.maximumNumberOfLines = 0
+        keysLabel.translatesAutoresizingMaskIntoConstraints = false
+        keysLabel.isHidden = defaults.bool(forKey: "hideKeys")
+        view.addSubview(keysLabel)
+        NSLayoutConstraint.activate([
+            keysLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
+            keysLabel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -18),
+        ])
+
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(view)
         NSApp.activate(ignoringOtherApps: true)
@@ -137,6 +161,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defaults.set(d.mode.rawValue, forKey: "mode")
         case ("l", _): d.locked.toggle()
         case ("h", _): hudPinned.toggle()
+        case ("k", _):
+            keysLabel.isHidden.toggle()
+            defaults.set(keysLabel.isHidden, forKey: "hideKeys")
         case ("[", _): renderer.adjustLatency(by: -0.01); defaults.set(renderer.analyzer.latencyCompensation, forKey: "latency")
         case ("]", _): renderer.adjustLatency(by: 0.01); defaults.set(renderer.analyzer.latencyCompensation, forKey: "latency")
         default: handled = false
@@ -180,7 +207,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             " Style: \(modeText)    \(tempo)",
             " Level \(bar(f.loudness))  Bass \(bar(f.bassAtt / 2))  Treble \(bar(f.trebAtt / 2))",
             String(format: " Sync offset %+.0f ms", renderer.analyzer.latencyCompensation * 1000),
-            " ←/→ preset · M style · L lock · F fullscreen · H HUD · [ ] sync ",
         ]
         if let problem { lines.insert(" " + problem.replacingOccurrences(of: "\n", with: "\n "), at: 0) }
         lines.append(" " + source.statusText + " ")
