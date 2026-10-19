@@ -52,14 +52,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var cardVisibleUntil: CFTimeInterval = 0
     private var cardShown = false
 
+    // Auto full screen: wake when Spotify starts playing, return when it has been stopped a while.
+    private enum ReturnTo { case none, windowed, background }
+    private var backgroundMode = false
+    private var returnTo = ReturnTo.none
+    private var pendingAfterExit = ReturnTo.none
+    private var wasPlaying = false
+    private var sawFirstPlayState = false
+    private var stoppedSince: CFTimeInterval?
+    private var idleTimer: Timer?
+    private let stopGrace: CFTimeInterval = 20
+    private var autoFullscreen: Bool { defaults.object(forKey: "autoFullscreen") as? Bool ?? true }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
 
         let demo = CommandLine.arguments.contains("--demo")
+        let startHidden = CommandLine.arguments.contains("--background")
         source = demo ? DemoSource() : SystemAudioTap()
-        do { try source.start() } catch {
-            captureError = error.localizedDescription
-        }
+        if !startHidden { startCapture() }
+        LoginItem.sync(enabled: openAtLogin)
 
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 760),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -140,10 +152,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         spotify.onChange = { [weak self] t in self?.trackChanged(t) }
         spotify.onArtwork = { [weak self] img, hue in
             self?.card.setArtwork(img)
+            debugLog("artwork loaded \(Int(img.size.width))px, hue \(hue.map { String(format: "%.2f", $0) } ?? "none")")
             self?.renderer.director.artHue = hue
         }
         spotify.start()
 
+        idleTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.checkIdle() }
+        if startHidden {
+            enterBackground()
+            return
+        }
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(view)
         NSApp.activate(ignoringOtherApps: true)
@@ -154,7 +172,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var lastTrackID = ""
 
+    private func startCapture() {
+        do {
+            try source.start()
+            captureError = nil
+        } catch {
+            captureError = error.localizedDescription
+        }
+    }
+
+    /// Hidden and idle: no window, no Dock icon, no audio capture; only listening for Spotify.
+    private func enterBackground() {
+        source.stop()
+        view.isPaused = true
+        window.orderOut(nil)
+        NSApp.setActivationPolicy(.accessory)
+        backgroundMode = true
+        returnTo = .none
+    }
+
+    private func wake(fullscreen: Bool) {
+        if backgroundMode {
+            backgroundMode = false
+            startCapture()
+            view.isPaused = false
+            NSApp.setActivationPolicy(.regular)
+        }
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        window.makeFirstResponder(view)
+        NSApp.activate(ignoringOtherApps: true)
+        if fullscreen && !window.styleMask.contains(.fullScreen) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let self, !self.window.styleMask.contains(.fullScreen) else { return }
+                self.window.toggleFullScreen(nil)
+            }
+        }
+    }
+
+    private func playStateChanged(playing: Bool) {
+        defer { wasPlaying = playing; sawFirstPlayState = true }
+        if playing != wasPlaying { debugLog("play state -> \(playing ? "playing" : "not playing"), background \(backgroundMode)") }
+        guard playing, !wasPlaying, autoFullscreen else { return }
+        // At normal launch, don't react to music that was already playing — only to it starting.
+        guard sawFirstPlayState || backgroundMode else { return }
+        if backgroundMode {
+            returnTo = .background
+        } else if !window.styleMask.contains(.fullScreen) {
+            returnTo = .windowed
+        }
+        stoppedSince = nil
+        wake(fullscreen: true)
+    }
+
+    private func checkIdle() {
+        guard returnTo != .none else { return }
+        if spotify.track?.playing == true {
+            stoppedSince = nil
+        } else {
+            let now = CACurrentMediaTime()
+            if stoppedSince == nil { stoppedSince = now }
+            if now - stoppedSince! > stopGrace { returnFromAuto() }
+        }
+    }
+
+    /// Undo an automatic take-over: leave full screen and, if we were hidden before, hide again.
+    private func returnFromAuto() {
+        let target = returnTo
+        returnTo = .none
+        stoppedSince = nil
+        if window.styleMask.contains(.fullScreen) {
+            pendingAfterExit = target
+            window.toggleFullScreen(nil)
+        } else if target == .background {
+            enterBackground()
+        }
+    }
+
     private func trackChanged(_ t: SpotifyNowPlaying.Track?) {
+        playStateChanged(playing: t?.playing ?? false)
         guard let t else { return }
         card.show(t)
         if t.id != lastTrackID {
@@ -178,10 +274,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    func windowDidEnterFullScreen(_ notification: Notification) { defaults.set(true, forKey: "fullscreen") }
-    func windowDidExitFullScreen(_ notification: Notification) { defaults.set(false, forKey: "fullscreen") }
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        if returnTo == .none { defaults.set(true, forKey: "fullscreen") }
+    }
+    func windowDidExitFullScreen(_ notification: Notification) {
+        let after = pendingAfterExit
+        pendingAfterExit = .none
+        if after == .background {
+            enterBackground()
+        } else if after == .none {
+            defaults.set(false, forKey: "fullscreen")
+        }
+    }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// With open-at-login on, closing the window just hides Wavedrop so it can wake for music later.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard openAtLogin else { return true }
+        enterBackground()
+        return false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        returnTo = .none
+        wake(fullscreen: defaults.bool(forKey: "fullscreen"))
+        return true
+    }
+
+    private var openAtLogin: Bool { defaults.object(forKey: "openAtLogin") as? Bool ?? true }
+
+    @objc private func toggleOpenAtLogin(_ sender: NSMenuItem) {
+        defaults.set(!openAtLogin, forKey: "openAtLogin")
+        LoginItem.sync(enabled: openAtLogin)
+        sender.state = openAtLogin ? .on : .off
+    }
+
+    @objc private func toggleAutoFullscreen(_ sender: NSMenuItem) {
+        defaults.set(!autoFullscreen, forKey: "autoFullscreen")
+        sender.state = autoFullscreen ? .on : .off
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !openAtLogin }
     func applicationWillTerminate(_ notification: Notification) { source?.stop() }
 
     private func buildMenu() {
@@ -190,6 +322,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         main.addItem(appItem)
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Wavedrop", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        let auto = NSMenuItem(title: "Full Screen When Spotify Plays", action: #selector(toggleAutoFullscreen(_:)), keyEquivalent: "")
+        auto.target = self
+        auto.state = autoFullscreen ? .on : .off
+        appMenu.addItem(auto)
+        let login = NSMenuItem(title: "Open at Login (hidden until music plays)", action: #selector(toggleOpenAtLogin(_:)), keyEquivalent: "")
+        login.target = self
+        login.state = openAtLogin ? .on : .off
+        appMenu.addItem(login)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Wavedrop", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quit Wavedrop", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -211,7 +352,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         switch (chars, e.keyCode) {
         case (_, 123): d.previous()                        // ←
         case (_, 124), (" ", _): d.next()                   // → / space
-        case (_, 53): if window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }   // esc
+        case (_, 53):                                       // esc
+            if returnTo != .none { returnFromAuto() }
+            else if window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
         case (_, 36), ("f", _): window.toggleFullScreen(nil)    // return / f
         case ("m", _):
             d.mode = d.mode.next

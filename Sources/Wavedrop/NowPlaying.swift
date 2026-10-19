@@ -54,6 +54,7 @@ final class SpotifyNowPlaying {
             guard let self, let script = self.script else { return }
             var err: NSDictionary?
             let out = script.executeAndReturnError(&err).stringValue ?? ""
+            if let err { debugLog("Spotify query failed: \(err)") }
             let parts = out.components(separatedBy: "\n")
             let t: Track? = parts.count >= 6
                 ? Track(id: parts[1], title: parts[2], artist: parts[3], album: parts[4], artworkURL: parts[5],
@@ -67,15 +68,36 @@ final class SpotifyNowPlaying {
         guard t != track else { return }
         track = t
         onChange?(t)
-        guard let t, !t.artworkURL.isEmpty, t.id != artworkFor, let url = URL(string: t.artworkURL) else { return }
+        guard let t, t.id != artworkFor else { return }
         artworkFor = t.id
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            guard let data, let img = NSImage(data: data) else { return }
-            let hue = Self.dominantHue(of: img)
-            DispatchQueue.main.async {
-                guard self?.track?.id == t.id else { return }
-                self?.onArtwork?(img, hue)
-            }
+        Self.artworkURL(for: t) { [weak self] url in
+            guard let url else { return }
+            URLSession.shared.dataTask(with: url) { data, _, _ in
+                guard let data, let img = NSImage(data: data) else { return }
+                let hue = Self.dominantHue(of: img)
+                DispatchQueue.main.async {
+                    guard self?.track?.id == t.id else { return }
+                    self?.onArtwork?(img, hue)
+                }
+            }.resume()
+        }
+    }
+
+    /// Newer Spotify builds return an empty `artwork url` over AppleScript, so fall back to
+    /// Spotify's public oEmbed endpoint, which gives the cover for a track ID.
+    private static func artworkURL(for t: Track, completion: @escaping (URL?) -> Void) {
+        if !t.artworkURL.isEmpty, let url = URL(string: t.artworkURL) { return completion(url) }
+        let parts = t.id.split(separator: ":")
+        guard parts.count == 3, parts[0] == "spotify",
+              var c = URLComponents(string: "https://open.spotify.com/oembed") else { return completion(nil) }
+        c.queryItems = [URLQueryItem(name: "url", value: "https://open.spotify.com/\(parts[1])/\(parts[2])")]
+        guard let api = c.url else { return completion(nil) }
+        URLSession.shared.dataTask(with: api) { data, _, _ in
+            guard let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  var thumb = json["thumbnail_url"] as? String else { return completion(nil) }
+            thumb = thumb.replacingOccurrences(of: "00001e02", with: "0000b273")   // 300 px → 640 px cover
+            completion(URL(string: thumb))
         }.resume()
     }
 
@@ -163,5 +185,16 @@ final class NowPlayingCard: NSView {
     func setArtwork(_ img: NSImage?) {
         art.image = img
         art.isHidden = img == nil
+    }
+}
+
+/// Appends to ~/Library/Logs/Wavedrop.log (handy for checking background behaviour).
+func debugLog(_ msg: String) {
+    let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Wavedrop.log")
+    let line = "\(Date()) \(msg)\n"
+    if let h = try? FileHandle(forWritingTo: url) {
+        h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close()
+    } else {
+        try? line.data(using: .utf8)!.write(to: url)
     }
 }
