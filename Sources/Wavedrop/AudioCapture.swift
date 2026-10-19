@@ -250,3 +250,20 @@ final class DemoSource: AudioSource {
         return Float(s * (0.15 + 0.85 * swell) * fadeIn)
     }
 }
+
+/// Whether any process is currently using the default output device (no permission needed).
+enum OutputDevice {
+    static func isRunning() -> Bool {
+        var dev = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &dev) == noErr else { return false }
+        var running: UInt32 = 0
+        size = UInt32(MemoryLayout<UInt32>.size)
+        addr.mSelector = kAudioDevicePropertyDeviceIsRunningSomewhere
+        guard AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, &running) == noErr else { return false }
+        return running != 0
+    }
+}

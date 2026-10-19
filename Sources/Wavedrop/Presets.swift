@@ -32,7 +32,7 @@ struct Uniforms {
     var time: Float = 0, dt: Float = 1, resX: Float = 1, resY: Float = 1
     var bass: Float = 0, mid: Float = 0, treb: Float = 0, bassAtt: Float = 0, midAtt: Float = 0, trebAtt: Float = 0
     var loudness: Float = 0, kick: Float = 0, hat: Float = 0, onset: Float = 0, beat: Float = 0, beatPhase: Float = 0
-    var rhythm: Float = 0, centroid: Float = 0, hue: Float = 0, flash: Float = 0, seed: Float = 0, rotSign: Float = 1
+    var rhythm: Float = 0, centroid: Float = 0, hue: Float = 0, flash: Float = 0, seed: Float = 0, rotSign: Float = 1, burst: Float = 0
     var p = PresetParams()
 }
 
@@ -120,6 +120,7 @@ final class Director {
     private var seed = Float.random(in: 0...100)
     private var rotSign: Float = 1
     private var beatSmooth: Float = 0
+    private var burst: Float = 0
     private(set) var lastEvent = ""
     /// Dominant hue of the current album art (from Spotify), if any. Pulls the palette toward the cover.
     var artHue: Float?
@@ -134,6 +135,14 @@ final class Director {
 
     var presetName: String { presets[currentIndex].name }
     var styleValue: Float { style }
+
+    /// A new song started: fresh look (unless locked), a flash and a shockwave ring.
+    func newTrack() {
+        if !locked { switchTo(pick(excluding: currentIndex), duration: 0.6) }
+        burst = 1
+        flash = max(flash, 0.3)
+        lastEvent = "new track"
+    }
 
     func select(_ index: Int, duration: Double = 0.01) { switchTo(index % presets.count, duration: duration) }
     func next() { switchTo(pick(excluding: currentIndex, sequential: 1), duration: 1.5) }
@@ -194,7 +203,7 @@ final class Director {
                     switchTo(pick(excluding: currentIndex), duration: 0.15)
                     flash = 1
                     lastEvent = "DROP"
-                } else if f.beatEvent && f.beatCount % 16 == 0 && sinceSwitch > 24 {
+                } else if f.beatEvent && f.beatInBar == 0 && f.barCount % 4 == 0 && sinceSwitch > 24 {
                     // Change on a phrase boundary; morph over ~2 beats.
                     let beat = f.bpm > 0 ? 60 / Double(f.bpm) : 0.5
                     switchTo(pick(excluding: currentIndex), duration: 2 * beat)
@@ -212,7 +221,7 @@ final class Director {
         }
 
         // Downbeat accents for electronic music.
-        if f.beatEvent && s > 0.5 && f.beatCount % 4 == 0 { flash = max(flash, 0.12 * s) }
+        if f.beatEvent && s > 0.5 && f.beatInBar == 0 { flash = max(flash, 0.12 * s) }
         flash *= Float(exp(-dt / 0.18))
 
         // ---- params ------------------------------------------------------------
@@ -263,6 +272,8 @@ final class Director {
         u.flash = flash
         u.seed = seed
         u.rotSign = rotSign
+        burst = max(0, burst - Float(dt / 1.0))
+        u.burst = burst
         if f.silent { p.brightness *= 0.0 }
         u.p = p
     }

@@ -99,4 +99,45 @@ enum Snapshot {
         CGImageDestinationFinalize(dest)
         print("wrote \(path)")
     }
+
+    /// `Wavedrop --burst-test out.png`: frames before/during a track-change shockwave, side by side.
+    static func burstTest(path: String) throws {
+        let device = MTLCreateSystemDefaultDevice()!
+        let w = 640, h = 360
+        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
+        td.usage = [.renderTarget, .shaderRead]
+        td.storageMode = .shared
+        let target = device.makeTexture(descriptor: td)!
+        let r = try Renderer(device: device, pixelFormat: .bgra8Unorm, source: DemoSource())
+        r.director.mode = .electronic
+        r.director.select(presets.firstIndex { $0.name == "Hyperspace Tunnel" } ?? 0)
+        var n = 0
+        func frames(_ count: Int) -> [[Float]] {
+            (0..<count).map { _ in
+                defer { n += 800 }
+                return (0..<800).map { k in DemoSource.electronic(Double(n + k) / 48_000) }
+            }
+        }
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        let ctx = CGContext(data: nil, width: w * 3, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!
+        func grab(_ col: Int) {
+            var bytes = [UInt8](repeating: 0, count: w * h * 4)
+            target.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+            let img = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: space,
+                              bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                              provider: CGDataProvider(data: Data(bytes) as CFData)!, decode: nil, shouldInterpolate: false,
+                              intent: .defaultIntent)!
+            ctx.draw(img, in: CGRect(x: col * w, y: 0, width: w, height: h))
+        }
+        let size = CGSize(width: w, height: h)
+        r.renderOffscreen(samples: frames(240), dt: 1.0 / 60, size: size, target: target); grab(0)
+        r.director.newTrack()
+        r.renderOffscreen(samples: frames(18), dt: 1.0 / 60, size: size, target: target); grab(1)
+        r.renderOffscreen(samples: frames(30), dt: 1.0 / 60, size: size, target: target); grab(2)
+        let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, UTType.png.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, ctx.makeImage()!, nil)
+        CGImageDestinationFinalize(dest)
+        print("wrote \(path)")
+    }
 }

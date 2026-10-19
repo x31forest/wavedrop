@@ -14,6 +14,9 @@ struct AudioFeatures {
     var beatPulse: Float = 0
     var beatPhase: Float = 0
     var beatCount: Int = 0
+    /// Position in the bar: 0 = downbeat (first beat of the bar), 1…3 = the others.
+    var beatInBar: Int = 0
+    var barCount: Int = 0
     var bpm: Float = 0
     /// How clearly periodic the music is: 0 = free-flowing (classical), 1 = steady pulse (electronic).
     var rhythm: Float = 0
@@ -86,6 +89,18 @@ final class AudioAnalyzer {
     private var lastBeatIndex = 0
     private var lastBeatTime: Double = -10
     private var beatCount = 0
+
+    // Downbeat (bar position) tracking: which of the 4 beat slots has the most harmonic change
+    // and bass weight — chords and basslines tend to move on the first beat of the bar.
+    private var beatChromaAcc = [Float](repeating: 0, count: 12)
+    private var prevBeatChroma = [Float](repeating: 0, count: 12)
+    private var slotScore = [Float](repeating: 0, count: 4)
+    private var lowPeak: Float = 0
+    private var lowPeakAvg: Float = 1e-3
+    private var beatJust = false
+    private var beatsSeen = 0
+    private var downbeatSlot = 0
+    private var barCount = 0
     private var pendingBeat = false
     /// Visual lookahead to compensate for analysis window + display latency.
     var latencyCompensation: Double = 0.035
@@ -233,6 +248,7 @@ final class AudioAnalyzer {
         fluxFull /= Float(kFull - 1)
         fluxHigh /= Float(kHigh1 - kHigh0)
         swap(&logMag, &prevLogMag)
+        lowPeak = max(fluxLow, lowPeak * 0.6)
 
         if !silent {
             if let s = kickDet.feed(fluxLow, time: t) { kickTime = t; kickStrength = s }
@@ -264,6 +280,7 @@ final class AudioAnalyzer {
                 lastBeatTime = t
                 beatCount += 1
                 pendingBeat = true
+                beatJust = true
             } else if idx < lastBeatIndex - 1 {
                 lastBeatIndex = idx
             }
@@ -315,6 +332,12 @@ final class AudioAnalyzer {
             }
         }
 
+        for i in 0..<12 { beatChromaAcc[i] += frameChroma[i] }
+        if beatJust {
+            beatJust = false
+            updateDownbeat()
+        }
+
         // Display spectrum.
         var frameMax: Float = -120
         for (i, r) in specRanges.enumerated() {
@@ -328,6 +351,29 @@ final class AudioAnalyzer {
         if !silent {
             if frameMax > specRef { specRef = frameMax } else { specRef -= 3 / frameRate }
         }
+    }
+
+    // MARK: - Bars
+
+    private func updateDownbeat() {
+        func norm(_ v: [Float]) -> Float { sqrt(v.reduce(0) { $0 + $1 * $1 }) }
+        let na = norm(beatChromaAcc), nb = norm(prevBeatChroma)
+        var dot: Float = 0
+        for i in 0..<12 { dot += beatChromaAcc[i] * prevBeatChroma[i] }
+        let harmonicChange = (na > 1e-9 && nb > 1e-9) ? 1 - dot / (na * nb) : 0
+        prevBeatChroma = beatChromaAcc
+        for i in 0..<12 { beatChromaAcc[i] = 0 }
+
+        lowPeakAvg += (lowPeak - lowPeakAvg) * 0.05
+        let kick = min(3, lowPeak / max(lowPeakAvg, 1e-6))
+        let slot = beatCount % 4
+        slotScore[slot] = slotScore[slot] * 0.92 + harmonicChange * 3 + kick * 0.3
+        beatsSeen += 1
+        if beatsSeen >= 16, rhythm > 0.3 {
+            let best = slotScore.indices.max { slotScore[$0] < slotScore[$1] }!
+            if slotScore[best] > 1.08 * slotScore[downbeatSlot] { downbeatSlot = best }
+        }
+        if ((beatCount - downbeatSlot) % 4 + 4) % 4 == 0 { barCount += 1 }
     }
 
     // MARK: - Tempo
@@ -470,6 +516,8 @@ final class AudioAnalyzer {
         let shown = phase + latencyCompensation * Double(bpm) / 60
         f.beatPhase = Float(shown - floor(shown))
         f.beatCount = beatCount
+        f.beatInBar = ((beatCount - downbeatSlot) % 4 + 4) % 4
+        f.barCount = barCount
         f.centroid = centroid
         f.keyHue = keyHue
         f.silent = rms < 3e-4

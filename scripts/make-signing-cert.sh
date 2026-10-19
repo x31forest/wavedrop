@@ -36,6 +36,8 @@ OPENSSL=$(command -v /opt/homebrew/bin/openssl || command -v openssl)
 
 security import "$TMP/cert.p12" -k "$KEYCHAIN" -P wavedrop -T /usr/bin/codesign
 security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$TMP/cert.pem"
+# Let codesign use the key without a keychain dialog on every build (asks for your login password here).
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -D "$NAME" -t private "$KEYCHAIN" >/dev/null
 
 security find-identity -v -p codesigning | grep "$NAME"
 echo "Done. Run ./build.sh — macOS will ask for Wavedrop's permissions one last time."
